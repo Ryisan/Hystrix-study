@@ -21,6 +21,8 @@ import com.netflix.hystrix.util.InternMap;
  * A key to represent a {@link HystrixThreadPool} for monitoring, metrics publishing, caching and other such uses.
  * <p>
  * This interface is intended to work natively with Enums so that implementing code can be an enum that implements this interface.
+ * 直白的说 ，希望通过相同的 name ( 标识 ) 获得同 HystrixThreadPoolKey 对象。
+ * 通过在内部维持一个 name 与 HystrixThreadPoolKey 对象的映射，以达到枚举的效果
  */
 public interface HystrixThreadPoolKey extends HystrixKey {
     class Factory {

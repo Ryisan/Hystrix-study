@@ -44,6 +44,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Future;
 
 /**
+ * 根据时间窗口和可选的最大批量尺寸，将多个请求折叠成一个 Hystrix命令
  * Collapse multiple requests into a single {@link HystrixCommand} execution based on a time window and optionally a max batch size.
  * <p>
  * This allows an object model to have multiple calls to the command that execute/queue many times in a short period (milliseconds) and have them all get batched into a single backend call.
@@ -229,6 +230,7 @@ public abstract class HystrixCollapser<BatchReturnType, ResponseType, RequestArg
      * If there are multiple arguments that need to be bundled, create a single object to contain them, or use a Tuple.
      * 
      * @return RequestArgumentType
+     * 获取单个命令参数
      */
     public abstract RequestArgumentType getRequestArgument();
 
@@ -246,6 +248,7 @@ public abstract class HystrixCollapser<BatchReturnType, ResponseType, RequestArg
      * @param requests
      *            {@code Collection<CollapsedRequest<ResponseType, RequestArgumentType>>} containing {@link CollapsedRequest} objects containing the arguments of each request collapsed in this batch.
      * @return {@link HystrixCommand}{@code <BatchReturnType>} which when executed will retrieve results for the batch of arguments as found in the Collection of {@link CollapsedRequest} objects
+     * 将多个命令请求合并，创建一个 HystrixCommand
      */
     protected abstract HystrixCommand<BatchReturnType> createCommand(Collection<CollapsedRequest<ResponseType, RequestArgumentType>> requests);
 
@@ -310,7 +313,9 @@ public abstract class HystrixCollapser<BatchReturnType, ResponseType, RequestArg
      * @param requests
      *            {@code Collection<CollapsedRequest<ResponseType, RequestArgumentType>>} containing {@link CollapsedRequest} objects containing the arguments of each request collapsed in this batch.
      *            <p>
-     *            The {@link CollapsedRequest#setResponse(Object)} or {@link CollapsedRequest#setException(Exception)} must be called on each {@link CollapsedRequest} in the Collection.
+     *            The {@link CollapsedRequest#setResponse(Object)} or
+     *            {@link CollapsedRequest#setException(Exception)} must be called on each {@link CollapsedRequest} in the Collection.
+     *            将一个 HystrixCommand 的执行结果，映射回对应的命令请求们。
      */
     protected abstract void mapResponseToRequests(BatchReturnType batchResponse, Collection<CollapsedRequest<ResponseType, RequestArgumentType>> requests);
 
@@ -394,9 +399,12 @@ public abstract class HystrixCollapser<BatchReturnType, ResponseType, RequestArg
                     }
                 }
 
+                // 获得 RequestCollapser
                 RequestCollapser<BatchReturnType, ResponseType, RequestArgumentType> requestCollapser = collapserFactory.getRequestCollapser(collapserInstanceWrapper);
+                // 提交 命令请求
                 Observable<ResponseType> response = requestCollapser.submitRequest(getRequestArgument());
 
+                // 获得 缓存Observable
                 if (isRequestCacheEnabled && cacheKey != null) {
                     HystrixCachedObservable<ResponseType> toCache = HystrixCachedObservable.from(response);
                     HystrixCachedObservable<ResponseType> fromCache = requestCache.putIfAbsent(cacheKey, toCache);

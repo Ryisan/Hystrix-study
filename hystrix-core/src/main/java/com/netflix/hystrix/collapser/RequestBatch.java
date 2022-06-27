@@ -69,6 +69,7 @@ public class RequestBatch<BatchReturnType, ResponseType, RequestArgumentType> {
 
         /*
          * The 'read' just means non-exclusive even though we are writing.
+         * 排它性锁
          */
         if (batchLock.readLock().tryLock()) {
             try {
@@ -80,6 +81,7 @@ public class RequestBatch<BatchReturnType, ResponseType, RequestArgumentType> {
                 if (argumentMap.size() >= maxBatchSize) {
                     return null;
                 } else {
+                    //创建 CollapsedRequestSubject ，并添加到队列
                     CollapsedRequestSubject<ResponseType, RequestArgumentType> collapsedRequest =
                             new CollapsedRequestSubject<ResponseType, RequestArgumentType>(arg, this);
                     final CollapsedRequestSubject<ResponseType, RequestArgumentType> existing = (CollapsedRequestSubject<ResponseType, RequestArgumentType>) argumentMap.putIfAbsent(arg, collapsedRequest);
@@ -97,6 +99,9 @@ public class RequestBatch<BatchReturnType, ResponseType, RequestArgumentType> {
                      */
                     if (existing != null) {
                         boolean requestCachingEnabled = properties.requestCacheEnabled().get();
+                        //当 argumentMap 已经存在 arg 对应的 Observable 时，必须开启缓存 ( HystrixCollapserProperties.requestCachingEnabled = true ) 功能。
+                        // 原因是，如果在相同的 arg ，并且未开启缓存，同时实现的是 collapsedRequest.toObservable() ，那么相同的 arg 将有多个 Observable 执行命令，
+                        // 此时 HystrixCollapserBridge#mapResponseToRequests(...) 方法无法将执行( Response )赋值到 arg 对应的命令请求( CollapsedRequestSubject )
                         if (requestCachingEnabled) {
                             return existing.toObservable();
                         } else {
@@ -158,19 +163,23 @@ public class RequestBatch<BatchReturnType, ResponseType, RequestArgumentType> {
          * - check that we only execute once since there's multiple paths to do so (timer, waiting thread or max batch size hit)
          * - close the gate so 'offer' can no longer be invoked and we turn those threads away so they create a new batch
          */
+        // 设置 执行已经开始
         if (batchStarted.compareAndSet(false, true)) {
             /* wait for 'offer'/'remove' threads to finish before executing the batch so 'requests' is complete */
             batchLock.writeLock().lock();
 
             try {
+                // 将多个命令请求分片成 N 个【多个命令请求】。
                 // shard batches
                 Collection<Collection<CollapsedRequest<ResponseType, RequestArgumentType>>> shards = commandCollapser.shardRequests(argumentMap.values());
                 // for each shard execute its requests 
                 for (final Collection<CollapsedRequest<ResponseType, RequestArgumentType>> shardRequests : shards) {
                     try {
+                        // 将多个命令请求合并，创建一个 HystrixCommand
                         // create a new command to handle this batch of requests
                         Observable<BatchReturnType> o = commandCollapser.createObservableCommand(shardRequests);
 
+                        // 将一个 HystrixCommand 的执行结果，映射回对应的命令请求们
                         commandCollapser.mapResponseToRequests(o, shardRequests).doOnError(new Action1<Throwable>() {
 
                             /**

@@ -98,6 +98,7 @@ public abstract class HystrixConcurrencyStrategy {
         final int dynamicCoreSize = threadPoolProperties.coreSize().get();
         final int keepAliveTime = threadPoolProperties.keepAliveTimeMinutes().get();
         final int maxQueueSize = threadPoolProperties.maxQueueSize().get();
+        //获得线程池的阻塞队列
         final BlockingQueue<Runnable> workQueue = getBlockingQueue(maxQueueSize);
 
         if (allowMaximumSizeToDivergeFromCoreSize) {
@@ -157,6 +158,7 @@ public abstract class HystrixConcurrencyStrategy {
          * and rejecting is the preferred solution.
          */
         if (maxQueueSize <= 0) {
+            //使用 SynchronousQueue 。超过线程池的 maximumPoolSize 时，提交任务被拒绝。
             return new SynchronousQueue<Runnable>();
         } else {
             return new LinkedBlockingQueue<Runnable>(maxQueueSize);

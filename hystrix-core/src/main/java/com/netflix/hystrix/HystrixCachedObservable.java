@@ -5,12 +5,17 @@ import rx.Subscription;
 import rx.functions.Action0;
 import rx.subjects.ReplaySubject;
 
+/**
+ * HystrixCachedObservable 是对传入Observable的一个封装
+ * @param <R>
+ */
 public class HystrixCachedObservable<R> {
     protected final Subscription originalSubscription;
     protected final Observable<R> cachedObservable;
     private volatile int outstandingSubscriptions = 0;
 
     protected HystrixCachedObservable(final Observable<R> originalObservable) {
+        //使用 ReplaySubject 向传入的 Observable 发起订阅，通过 ReplaySubject 能够重放执行结果，从而实现缓存的功效
         ReplaySubject<R> replaySubject = ReplaySubject.create();
         this.originalSubscription = originalObservable
                 .subscribe(replaySubject);

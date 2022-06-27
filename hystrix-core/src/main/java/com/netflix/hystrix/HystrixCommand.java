@@ -308,6 +308,7 @@ public abstract class HystrixCommand<R> extends AbstractCommand<R> implements Hy
             @Override
             public void call() {
                 // Save thread on which we get subscribed so that we can interrupt it later if needed
+                // 记录 执行线程
                 executionThread.set(Thread.currentThread());
             }
         });
@@ -368,12 +369,14 @@ public abstract class HystrixCommand<R> extends AbstractCommand<R> implements Hy
      *             via {@code Future.get()} in {@link ExecutionException#getCause()} if invalid arguments or state were used representing a user failure, not a system failure
      * @throws IllegalStateException
      *             if invoked more than once
+     *    同步调用，run()方法 子类实现该方法，执行正常的业务逻辑。
      */
     public Future<R> queue() {
         /*
          * The Future returned by Observable.toBlocking().toFuture() does not implement the
          * interruption of the execution thread when the "mayInterrupt" flag of Future.cancel(boolean) is set to true;
-         * thus, to comply with the contract of Future, we must wrap around it.
+         * thus, to comply with the contract of Future, we must wrap around it.\
+         * 将 Observable 转换成阻塞的
          */
         final Future<R> delegate = toObservable().toBlocking().toFuture();
     	

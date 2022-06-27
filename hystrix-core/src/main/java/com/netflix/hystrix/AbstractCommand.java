@@ -57,6 +57,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+/**
+ * Hystrix 执行命令类
+ * @param <R>
+ */
 /* package */abstract class AbstractCommand<R> implements HystrixInvokableInfo<R>, HystrixObservable<R> {
     private static final Logger logger = LoggerFactory.getLogger(AbstractCommand.class);
     protected final HystrixCircuitBreaker circuitBreaker;
@@ -320,9 +324,12 @@ import java.util.concurrent.atomic.AtomicReference;
      *             via {@code Observer#onError} if invalid arguments or state were used representing a user failure, not a system failure
      * @throws IllegalStateException
      *             if invoked more than once
+     *  调用 #toObservable() 方法的基础上，向 Observable 注册 rx.subjects.ReplaySubject 发起订阅 。
      */
     public Observable<R> observe() {
         // us a ReplaySubject to buffer the eagerly subscribed-to Observable
+        //ReplaySubject 会发射所有来自原始 Observable 的数据给观察者，无论它们是何时订阅的。感兴趣的同学可以阅读
+        //ReplySubject 能够重放执行结果，从而实现缓存的功效。
         ReplaySubject<R> subject = ReplaySubject.create();
         // eagerly kick off subscription
         final Subscription sourceSubscription = toObservable().subscribe(subject);
@@ -360,8 +367,12 @@ import java.util.concurrent.atomic.AtomicReference;
      *             via {@code Observer#onError} if invalid arguments or state were used representing a user failure, not a system failure
      * @throws IllegalStateException
      *             if invoked more than once
+     *             未做订阅
+     *  将请求包装成被观察者
+     *  对于Hystrix命令的响应，总是以可观察者的形式返回，尽管可观察的可能根据你调用命令的方法进行转换
      */
     public Observable<R> toObservable() {
+        //_cmd 指向当前命令对象，用于下面实现 FuncX ，ActionX 内部类使用。
         final AbstractCommand<R> _cmd = this;
 
         //doOnCompleted handler already did all of the SUCCESS work
@@ -411,12 +422,16 @@ import java.util.concurrent.atomic.AtomicReference;
             }
         };
 
+        //当缓存特性未开启，或者缓存未命中时，
+        // 使用 applyHystrixSemantics 传入 Observable#defer(...) 方法，声明执行命令的 Observable
         final Func0<Observable<R>> applyHystrixSemantics = new Func0<Observable<R>>() {
             @Override
             public Observable<R> call() {
+                // commandState 处于 UNSUBSCRIBED 时，不执行命令
                 if (commandState.get().equals(CommandState.UNSUBSCRIBED)) {
                     return Observable.never();
                 }
+                // 获得 执行Observable
                 return applyHystrixSemantics(_cmd);
             }
         };
@@ -455,13 +470,16 @@ import java.util.concurrent.atomic.AtomicReference;
         return Observable.defer(new Func0<Observable<R>>() {
             @Override
             public Observable<R> call() {
+
                  /* this is a stateful object so can only be used once */
+                //一条命令只能执行一次。
                 if (!commandState.compareAndSet(CommandState.NOT_STARTED, CommandState.OBSERVABLE_CHAIN_CREATED)) {
                     IllegalStateException ex = new IllegalStateException("This instance can only be executed once. Please instantiate a new instance.");
                     //TODO make a new error type for this
                     throw new HystrixRuntimeException(FailureType.BAD_REQUEST_EXCEPTION, _cmd.getClass(), getLogMessagePrefix() + " command executed multiple times - this is not permitted.", ex, null);
                 }
 
+                // 命令开始时间戳
                 commandStartTimestamp = System.currentTimeMillis();
 
                 if (properties.requestLogEnabled().get()) {
@@ -471,35 +489,44 @@ import java.util.concurrent.atomic.AtomicReference;
                     }
                 }
 
+                // 缓存开关
                 final boolean requestCacheEnabled = isRequestCachingEnabled();
+                // 缓存KEY
                 final String cacheKey = getCacheKey();
 
+                // 优先从缓存中获取
                 /* try from cache first */
                 if (requestCacheEnabled) {
                     HystrixCommandResponseFromCache<R> fromCache = (HystrixCommandResponseFromCache<R>) requestCache.get(cacheKey);
                     if (fromCache != null) {
-                        isResponseFromCache = true;
+                        isResponseFromCache = true;// 标记 从缓存中结果
                         return handleRequestCacheHitAndEmitValues(fromCache, _cmd);
                     }
                 }
 
+                // 获得 执行命令Observable
                 Observable<R> hystrixObservable =
                         Observable.defer(applyHystrixSemantics)
                                 .map(wrapWithAllOnNextHooks);
 
+                // 获得 缓存Observable
                 Observable<R> afterCache;
 
                 // put in cache
                 if (requestCacheEnabled && cacheKey != null) {
                     // wrap it for caching
                     HystrixCachedObservable<R> toCache = HystrixCachedObservable.from(hystrixObservable, _cmd);
+
                     HystrixCommandResponseFromCache<R> fromCache = (HystrixCommandResponseFromCache<R>) requestCache.putIfAbsent(cacheKey, toCache);
-                    if (fromCache != null) {
+                    // 并发若不存在
+                    if (fromCache != null) {//添加失败
                         // another thread beat us so we'll use the cached value instead
+                        //这一步很关键，因为我们不希望缓存不存在时，多个线程去执行命令，最好有且只有一个线程执行命令
                         toCache.unsubscribe();
-                        isResponseFromCache = true;
+                        isResponseFromCache = true;// 标记 从缓存中结果
+                        //
                         return handleRequestCacheHitAndEmitValues(fromCache, _cmd);
-                    } else {
+                    } else {// 添加成功
                         // we just created an ObservableCommand so we cast and return it
                         afterCache = toCache.toObservable();
                     }
@@ -515,6 +542,7 @@ import java.util.concurrent.atomic.AtomicReference;
         });
     }
 
+    //命令执行逻辑
     private Observable<R> applyHystrixSemantics(final AbstractCommand<R> _cmd) {
         // mark that we're starting execution on the ExecutionHook
         // if this hook throws an exception, then a fast-fail occurs with no fallback.  No state is left inconsistent
@@ -522,7 +550,9 @@ import java.util.concurrent.atomic.AtomicReference;
 
         /* determine if we're allowed to execute */
         if (circuitBreaker.attemptExecution()) {
+            // 获得 信号量
             final TryableSemaphore executionSemaphore = getExecutionSemaphore();
+            // 信号量释放Action
             final AtomicBoolean semaphoreHasBeenReleased = new AtomicBoolean(false);
             final Action0 singleSemaphoreRelease = new Action0() {
                 @Override
@@ -533,6 +563,7 @@ import java.util.concurrent.atomic.AtomicReference;
                 }
             };
 
+            // TODO 【2011】【Hystrix 事件机制】
             final Action1<Throwable> markExceptionThrown = new Action1<Throwable>() {
                 @Override
                 public void call(Throwable t) {
@@ -540,10 +571,13 @@ import java.util.concurrent.atomic.AtomicReference;
                 }
             };
 
+            // 信号量 获得
             if (executionSemaphore.tryAcquire()) {
                 try {
+                    // 标记 executionResult 调用开始时间
                     /* used to track userThreadExecutionTime */
                     executionResult = executionResult.setInvocationStartTime(System.currentTimeMillis());
+                    // 获得 执行Observable
                     return executeCommandAndObserve(_cmd)
                             .doOnError(markExceptionThrown)
                             .doOnTerminate(singleSemaphoreRelease)
@@ -552,9 +586,11 @@ import java.util.concurrent.atomic.AtomicReference;
                     return Observable.error(e);
                 }
             } else {
+                //处理信号量拒绝的失败回退逻辑
                 return handleSemaphoreRejectionViaFallback();
             }
         } else {
+            //处理链路熔断的失败回退逻辑
             return handleShortCircuitViaFallback();
         }
     }
@@ -599,17 +635,21 @@ import java.util.concurrent.atomic.AtomicReference;
             }
         };
 
+        // 失败回退逻辑 Func1
         final Func1<Throwable, Observable<R>> handleFallback = new Func1<Throwable, Observable<R>>() {
             @Override
             public Observable<R> call(Throwable t) {
+                // 标记尝试成功
                 circuitBreaker.markNonSuccess();
+                // 标记 executionResult 执行异常
                 Exception e = getExceptionFromThrowable(t);
                 executionResult = executionResult.setExecutionException(e);
-                if (e instanceof RejectedExecutionException) {
+                // 返回 【回退逻辑 Observable】
+                if (e instanceof RejectedExecutionException) {//线程池提交任务异常
                     return handleThreadPoolRejectionViaFallback(e);
-                } else if (t instanceof HystrixTimeoutException) {
+                } else if (t instanceof HystrixTimeoutException) {//执行命令超时
                     return handleTimeoutViaFallback();
-                } else if (t instanceof HystrixBadRequestException) {
+                } else if (t instanceof HystrixBadRequestException) {//
                     return handleBadRequestByEmittingError(e);
                 } else {
                     /*
@@ -633,8 +673,10 @@ import java.util.concurrent.atomic.AtomicReference;
         };
 
         Observable<R> execution;
+        //若执行命令超时特性开启
         if (properties.executionTimeoutEnabled().get()) {
             execution = executeCommandWithSpecifiedIsolation(_cmd)
+                    //HystrixObservableTimeoutOperator 实现对超时命令的监控
                     .lift(new HystrixObservableTimeoutOperator<R>(_cmd));
         } else {
             execution = executeCommandWithSpecifiedIsolation(_cmd);
@@ -646,30 +688,37 @@ import java.util.concurrent.atomic.AtomicReference;
                 .doOnEach(setRequestContext);
     }
 
+
     private Observable<R> executeCommandWithSpecifiedIsolation(final AbstractCommand<R> _cmd) {
+        //线程池隔离策略
         if (properties.executionIsolationStrategy().get() == ExecutionIsolationStrategy.THREAD) {
             // mark that we are executing in a thread (even if we end up being rejected we still were a THREAD execution and not SEMAPHORE)
             return Observable.defer(new Func0<Observable<R>>() {
                 @Override
                 public Observable<R> call() {
+                    // 标记 executionResult 执行已发生
                     executionResult = executionResult.setExecutionOccurred();
+                    // 设置 commandState 为 USER_CODE_EXECUTED
                     if (!commandState.compareAndSet(CommandState.OBSERVABLE_CHAIN_CREATED, CommandState.USER_CODE_EXECUTED)) {
                         return Observable.error(new IllegalStateException("execution attempted while in state : " + commandState.get().name()));
                     }
 
                     metrics.markCommandStart(commandKey, threadPoolKey, ExecutionIsolationStrategy.THREAD);
 
+                    //执行超时
                     if (isCommandTimedOut.get() == TimedOutStatus.TIMED_OUT) {
                         // the command timed out in the wrapping thread so we will return immediately
                         // and not increment any of the counters below or other such logic
                         return Observable.error(new RuntimeException("timed out before executing run()"));
                     }
+                    // 设置 线程状态 为 ThreadState.STARTED
                     if (threadState.compareAndSet(ThreadState.NOT_USING_THREAD, ThreadState.STARTED)) {
                         //we have not been unsubscribed, so should proceed
                         HystrixCounters.incrementGlobalConcurrentThreads();
                         threadPool.markThreadExecution();
                         // store the command that is being run
                         endCurrentThreadExecutingCommand = Hystrix.startCurrentThreadExecutingCommand(getCommandKey());
+                        // 标记 executionResult 使用线程执行
                         executionResult = executionResult.setExecutedInThread();
                         /**
                          * If any of these hooks throw an exception, then it appears as if the actual execution threw an error
@@ -678,6 +727,7 @@ import java.util.concurrent.atomic.AtomicReference;
                             executionHook.onThreadStart(_cmd);
                             executionHook.onRunStart(_cmd);
                             executionHook.onExecutionStart(_cmd);
+                            // 获得 执行Observable
                             return getUserExecutionObservable(_cmd);
                         } catch (Throwable ex) {
                             return Observable.error(ex);
@@ -710,6 +760,7 @@ import java.util.concurrent.atomic.AtomicReference;
                     //if it was terminal, then other cleanup handled it
                 }
             }).subscribeOn(threadPool.getScheduler(new Func0<Boolean>() {
+                //具体执行
                 @Override
                 public Boolean call() {
                     return properties.executionIsolationThreadInterruptOnTimeout().get() && _cmd.isCommandTimedOut.get() == TimedOutStatus.TIMED_OUT;
@@ -731,6 +782,7 @@ import java.util.concurrent.atomic.AtomicReference;
                     try {
                         executionHook.onRunStart(_cmd);
                         executionHook.onExecutionStart(_cmd);
+                        // 获得 执行Observable
                         return getUserExecutionObservable(_cmd);  //the getUserExecutionObservable method already wraps sync exceptions, so this shouldn't throw
                     } catch (Throwable ex) {
                         //If the above hooks throw, then use that as the result of the run method
@@ -756,13 +808,15 @@ import java.util.concurrent.atomic.AtomicReference;
      *             if getFallback() fails (throws an Exception) or is rejected by the semaphore
      */
     private Observable<R> getFallbackOrThrowException(final AbstractCommand<R> _cmd, final HystrixEventType eventType, final FailureType failureType, final String message, final Exception originalException) {
+        // 记录 HystrixRequestContext
         final HystrixRequestContext requestContext = HystrixRequestContext.getContextForCurrentThread();
+        // 标记 executionResult 添加( 记录 )事件
         long latency = System.currentTimeMillis() - executionResult.getStartTimestamp();
         // record the executionResult
         // do this before executing fallback so it can be queried from within getFallback (see See https://github.com/Netflix/Hystrix/pull/144)
         executionResult = executionResult.addEvent((int) latency, eventType);
 
-        if (isUnrecoverable(originalException)) {
+        if (isUnrecoverable(originalException)) {// 无法恢复的异常
             logger.error("Unrecoverable Error for HystrixCommand so will throw HystrixRuntimeException and not apply fallback. ", originalException);
 
             /* executionHook for all errors */
@@ -1129,7 +1183,9 @@ import java.util.concurrent.atomic.AtomicReference;
 
         @Override
         public Subscriber<? super R> call(final Subscriber<? super R> child) {
+            // 创建 订阅
             final CompositeSubscription s = new CompositeSubscription();
+            // 添加 订阅
             // if the child unsubscribes we unsubscribe our parent as well
             child.add(s);
 
@@ -1255,7 +1311,7 @@ import java.util.concurrent.atomic.AtomicReference;
      */
     protected TryableSemaphore getExecutionSemaphore() {
         if (properties.executionIsolationStrategy().get() == ExecutionIsolationStrategy.SEMAPHORE) {
-            if (executionSemaphoreOverride == null) {
+            if (executionSemaphoreOverride == null) {// 不存在时，创建 TryableSemaphoreActual
                 TryableSemaphore _s = executionSemaphorePerCircuit.get(commandKey.name());
                 if (_s == null) {
                     // we didn't find one cache so setup
@@ -1607,7 +1663,12 @@ import java.util.concurrent.atomic.AtomicReference;
      * AtomicInteger achieves the same behavior and performance without the more complex implementation of the actual Semaphore class using AbstractQueueSynchronizer.
      */
     /* package */static class TryableSemaphoreActual implements TryableSemaphore {
+        //信号量上限
+        //com.netflix.hystrix.strategy.properties.HystrixProperty 是一个接口，
+        // 当其使用类似 com.netflix.hystrix.strategy.properties.archaius.IntegerDynamicProperty 动态属性的实现时，
+        // 可以实现动态调整信号量的上限,这就是上文提到的为什么不使用 java.util.concurrent.Semaphore 的原因之一。
         protected final HystrixProperty<Integer> numberOfPermits;
+        //信号量使用数量
         private final AtomicInteger count = new AtomicInteger(0);
 
         public TryableSemaphoreActual(HystrixProperty<Integer> numberOfPermits) {
@@ -1637,6 +1698,14 @@ import java.util.concurrent.atomic.AtomicReference;
 
     }
 
+    /**
+     * 无操作的信号量
+     * 从实现上看，#tryAcquire() 方法，每次都返回的是 true ；
+     * #release() 方法，无任何操作。
+     * 这个是为什么？在 Hystrix 里提供了两种执行隔离策略 ：
+     * 1）Thread ，该方式不使用信号量，因此使用 TryableSemaphoreNoOp ，这样每次调用 #tryAcquire() 都能返回 true
+     * 2）Semaphore ，该方式使用信号量，因此使用 TryableSemaphoreActual ，这样每次调用 #tryAcquire() 根据情况返回 true / false
+     */
     /* package */static class TryableSemaphoreNoOp implements TryableSemaphore {
 
         public static final TryableSemaphore DEFAULT = new TryableSemaphoreNoOp();
@@ -1658,6 +1727,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
     }
 
+    //Hystrix 定义的信号量接口
     /* package */static interface TryableSemaphore {
 
         /**

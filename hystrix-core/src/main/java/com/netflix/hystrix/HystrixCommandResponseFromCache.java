@@ -15,6 +15,11 @@ public class HystrixCommandResponseFromCache<R> extends HystrixCachedObservable<
     }
 
     public Observable<R> toObservableWithStateCopiedInto(final AbstractCommand<R> commandToCopyStateInto) {
+        //通过 completionLogicRun 属性，保证
+        // #doOnError() ，
+        // #doOnCompleted() ，
+        // #doOnUnsubscribe()
+        // 方法有且只有一个方法执行具体逻辑。
         final AtomicBoolean completionLogicRun = new AtomicBoolean(false);
 
         return cachedObservable

@@ -38,6 +38,8 @@ import com.netflix.hystrix.util.HystrixTimer.TimerListener;
  * Must be thread-safe since it exists within a RequestVariable which is request-scoped and can be accessed from multiple threads.
  * 
  * @ThreadSafe
+ *   1）提交单个命令请求到请求队列( RequestQueue )
+ *   2）接收来自定时任务提交的多个命令，合并执行
  */
 public class RequestCollapser<BatchReturnType, ResponseType, RequestArgumentType> {
     static final Logger logger = LoggerFactory.getLogger(RequestCollapser.class);
@@ -94,6 +96,7 @@ public class RequestCollapser<BatchReturnType, ResponseType, RequestArgumentType
             if (arg != null) {
                 response = b.offer(arg);
             } else {
+                //特殊处理，因为ConcurrentHashMap ，不允许值为 null
                 response = b.offer( (RequestArgumentType) NULL_SENTINEL);
             }
             // it will always get an Observable unless we hit the max batch size
@@ -110,8 +113,10 @@ public class RequestCollapser<BatchReturnType, ResponseType, RequestArgumentType
         if (previousBatch == null) {
             throw new IllegalStateException("Trying to start null batch which means it was shutdown already.");
         }
+        //通过 CAS 修改 batch ，保证并发情况下的线程安全。同时注意，此处也进行了新的 RequestBatch ，切换掉老的 RequestBatch
         if (batch.compareAndSet(previousBatch, new RequestBatch<BatchReturnType, ResponseType, RequestArgumentType>(properties, commandCollapser, properties.maxRequestsInBatch().get()))) {
             // this thread won so trigger the previous batch
+            //使用老的 RequestBatch ，调用 RequestBatch#executeBatchIfNotAlreadyStarted() 方法，命令合并执行。
             previousBatch.executeBatchIfNotAlreadyStarted();
         }
     }

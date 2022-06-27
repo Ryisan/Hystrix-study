@@ -40,10 +40,13 @@ public class RequestCollapserFactory<BatchReturnType, ResponseType, RequestArgum
 
     private static final Logger logger = LoggerFactory.getLogger(RequestCollapserFactory.class);
 
+    //命令合并器的定时器
     private final CollapserTimer timer;
+    //命令合并器标识
     private final HystrixCollapserKey collapserKey;
     private final HystrixCollapserProperties properties;
     private final HystrixConcurrencyStrategy concurrencyStrategy;
+    //命令请求作用域
     private final Scope scope;
 
     public static interface Scope {
@@ -80,6 +83,7 @@ public class RequestCollapserFactory<BatchReturnType, ResponseType, RequestArgum
     public HystrixCollapserProperties getProperties() {
         return properties;
     }
+
 
     public RequestCollapser<BatchReturnType, ResponseType, RequestArgumentType> getRequestCollapser(HystrixCollapserBridge<BatchReturnType, ResponseType, RequestArgumentType> commandCollapser) {
         if (Scopes.REQUEST == Scopes.valueOf(getScope().name())) {
